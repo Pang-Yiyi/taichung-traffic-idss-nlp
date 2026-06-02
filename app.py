@@ -89,6 +89,18 @@ _CHART_CAPTIONS = {
     "weather_hour_heatmap.png":  "天候 × 時段熱力圖",
 }
 
+_CHART_DECISION_USE = {
+    "hourly_accidents.png":      "判斷哪些時段應避開或加強勤務。",
+    "weekly_accidents.png":      "比較平日、週末事故差異，支援排班與宣導規劃。",
+    "monthly_accidents.png":     "觀察月份與季節性變化，支援中長期政策規劃。",
+    "district_accidents.png":    "找出事故集中行政區，支援優先改善排序。",
+    "main_causes.png":           "確認主要肇因，支援宣導、執法與工程改善方向。",
+    "weather_accidents.png":     "比較不同天候事故量，支援天候警示與出行提醒。",
+    "alcohol_accidents.png":     "檢視酒駕相關風險，支援取締與宣導策略。",
+    "hourly_regression.png":     "觀察時段趨勢，支援尖峰風險解釋。",
+    "weather_hour_heatmap.png":  "同時比較天候與時段交互風險，支援複合情境判斷。",
+}
+
 DISTRICT_OPTIONS = [
     "不指定",
     # 市區
@@ -573,7 +585,7 @@ def _render_chat_result(result: dict, show_debug: bool = False) -> None:
     with st.expander("👤 角色化建議與行動分級", expanded=False):
         _render_role_action_guidance(result)
 
-    _render_inline_charts(result)
+    _render_inline_multimodal_evidence(result)
 
     if show_debug:
         with st.expander("🛠 除錯資訊", expanded=False):
@@ -756,6 +768,47 @@ def _render_decision_map(result: dict) -> dict:
         _render_map_interpretation(query, filtered, district_counts)
         segment_result = _render_segment_hotspots(filtered)
     return segment_result
+
+
+def _render_chat_map_preview(query: dict) -> None:
+    """聊天泡泡內的輕量地圖預覽，完整分析仍放在決策分析頁。"""
+    try:
+        map_df = _load_map_data()
+    except Exception as exc:
+        st.warning(f"目前無法載入地圖資料：{exc}")
+        return
+
+    filtered = map_df
+    if query.get("district"):
+        filtered = filtered[filtered["區"] == query["district"]]
+    if query.get("hour") is not None:
+        filtered = filtered[filtered["hour"] == query["hour"]]
+    if query.get("weekday"):
+        filtered = filtered[filtered["weekday"] == query["weekday"]]
+    if query.get("month") is not None:
+        filtered = filtered[filtered["month"] == query["month"]]
+    if query.get("weather"):
+        filtered = filtered[filtered["天候_str"] == query["weather"]]
+
+    if filtered.empty:
+        st.info("目前條件下沒有可顯示的事故點位。")
+        return
+
+    sample_size = min(len(filtered), 1000)
+    display_df = filtered.sample(sample_size, random_state=42) if len(filtered) > sample_size else filtered
+    st.map(display_df[["lat", "lon"]], use_container_width=True)
+    st.caption(f"顯示 {len(display_df):,} / {len(filtered):,} 筆事故點位。")
+
+    top_districts = (
+        filtered["區"]
+        .value_counts()
+        .head(5)
+        .rename_axis("行政區")
+        .reset_index(name="事故數")
+    )
+    if not top_districts.empty:
+        st.markdown("**地圖範圍內行政區事故排序**")
+        st.dataframe(top_districts, hide_index=True, use_container_width=True)
 
 
 def _render_weather_hour_heatmap(query: dict) -> None:
@@ -960,36 +1013,172 @@ def _render_patrol_coverage() -> None:
 
 _INTENT_CHARTS: dict[str, list[str]] = {
     "風險預測":     ["weather_hour_heatmap.png", "weather_accidents.png", "hourly_accidents.png"],
-    "時段查詢":     ["hourly_accidents.png", "weekly_accidents.png", "hourly_regression.png"],
-    "事故熱點查詢": ["district_accidents.png"],
-    "肇因分析":     ["main_causes.png"],
-    "政策建議":     ["district_accidents.png", "main_causes.png", "hourly_accidents.png"],
-    "民眾出行建議": ["hourly_accidents.png", "weather_accidents.png"],
+    "時段查詢":     ["hourly_accidents.png", "hourly_regression.png", "weekly_accidents.png"],
+    "事故熱點查詢": ["district_accidents.png", "hourly_accidents.png"],
+    "肇因分析":     ["main_causes.png", "district_accidents.png"],
+    "政策建議":     ["district_accidents.png", "main_causes.png", "hourly_accidents.png", "weather_hour_heatmap.png"],
+    "民眾出行建議": ["hourly_accidents.png", "weather_accidents.png", "district_accidents.png"],
 }
 
 
-def _render_inline_charts(result: dict) -> None:
-    """依 intent 顯示相關圖表（使用者主動點擊才展開）。"""
+def _unique_keep_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for item in items:
+        if item and item not in seen:
+            seen.add(item)
+            output.append(item)
+    return output
+
+
+def _recommend_visual_evidence(result: dict) -> dict:
+    """依意圖、問題文字與實體條件推薦圖表/地圖/表格佐證。"""
     intent = result.get("intent", {}).get("intent", "")
-    chart_names = _INTENT_CHARTS.get(intent, [])
-    existing = [BASE_DIR / "charts" / name for name in chart_names
-                if (BASE_DIR / "charts" / name).exists()]
-    if not existing:
+    query = result.get("query", {})
+    user_input = result.get("user_input", "")
+
+    charts = list(_INTENT_CHARTS.get(intent, []))
+    text = f"{user_input} {query.get('weather', '')} {query.get('district', '')}"
+
+    if any(kw in text for kw in ["時段", "時間", "幾點", "早上", "晚上", "下班", "上班", "凌晨"]):
+        charts.extend(["hourly_accidents.png", "hourly_regression.png"])
+    if any(kw in text for kw in ["行政區", "哪區", "哪個區", "地區", "區域", "熱點", "最多", "排名"]):
+        charts.extend(["district_accidents.png"])
+    if any(kw in text for kw in ["雨", "天氣", "天候", "霧", "晴", "陰", "風"]):
+        charts.extend(["weather_hour_heatmap.png", "weather_accidents.png"])
+    if any(kw in text for kw in ["肇因", "原因", "代碼", "闖紅燈", "酒", "車距", "號誌"]):
+        charts.extend(["main_causes.png"])
+    if "酒" in text:
+        charts.extend(["alcohol_accidents.png"])
+    if any(kw in text for kw in ["政策", "交通局", "警察", "改善", "勤務", "巡邏", "工程"]):
+        charts.extend(["district_accidents.png", "main_causes.png", "hourly_accidents.png"])
+    if intent == "民眾出行建議" or any(kw in text for kw in ["路線", "出發", "逢甲", "火車站", "騎", "開車"]):
+        charts.extend(["hourly_accidents.png", "weather_accidents.png", "district_accidents.png"])
+
+    chart_paths = [
+        BASE_DIR / "charts" / name
+        for name in _unique_keep_order(charts)
+        if (BASE_DIR / "charts" / name).exists()
+    ][:4]
+
+    show_map = intent in {"事故熱點查詢", "政策建議", "民眾出行建議"} or any(
+        kw in text for kw in ["熱點", "地圖", "路口", "路線", "逢甲", "火車站", "哪裡", "哪個區"]
+    )
+    show_table = intent in {"風險預測", "事故熱點查詢", "政策建議", "民眾出行建議"} or bool(query.get("district"))
+
+    return {"charts": chart_paths, "show_map": show_map, "show_table": show_table}
+
+
+def _filter_accident_df_for_query(query: dict) -> pd.DataFrame:
+    df = load_accident_data()
+    filtered = df
+    if query.get("district"):
+        filtered = filtered[filtered["區"] == query["district"]]
+    if query.get("hour") is not None:
+        filtered = filtered[filtered["hour"] == query["hour"]]
+    if query.get("weekday"):
+        filtered = filtered[filtered["weekday"] == query["weekday"]]
+    if query.get("month") is not None:
+        filtered = filtered[filtered["month"] == query["month"]]
+    if query.get("weather"):
+        filtered = filtered[filtered["天候_str"] == query["weather"]]
+    return filtered
+
+
+def _render_visual_summary_table(result: dict) -> None:
+    """在聊天中用小表格補充決策佐證，避免只顯示大圖。"""
+    query = result.get("query", {})
+    try:
+        filtered = _filter_accident_df_for_query(query)
+    except Exception as exc:
+        st.caption(f"摘要表暫無法產生：{exc}")
         return
 
-    # 用 result id 作為唯一 key
-    uid = abs(hash(result.get("user_input", "") + intent)) % 100000
-    key = f"charts_{uid}"
+    if filtered.empty:
+        st.caption("目前條件下沒有足夠資料產生摘要表。")
+        return
 
-    if st.button("📊 顯示相關圖表", key=f"btn_{key}", use_container_width=False):
+    col1, col2 = st.columns(2)
+    with col1:
+        hour_top = (
+            filtered["hour"]
+            .value_counts()
+            .head(5)
+            .rename_axis("時段")
+            .reset_index(name="事故數")
+        )
+        hour_top["時段"] = hour_top["時段"].astype(int).astype(str) + "時"
+        st.markdown("**高事故時段 Top 5**")
+        st.dataframe(hour_top, hide_index=True, use_container_width=True)
+
+    with col2:
+        if query.get("district"):
+            weather_top = (
+                filtered["天候_str"]
+                .value_counts()
+                .head(5)
+                .rename_axis("天候")
+                .reset_index(name="事故數")
+            )
+            st.markdown("**天候分布 Top 5**")
+            st.dataframe(weather_top, hide_index=True, use_container_width=True)
+        else:
+            district_top = (
+                filtered["區"]
+                .value_counts()
+                .head(5)
+                .rename_axis("行政區")
+                .reset_index(name="事故數")
+            )
+            st.markdown("**行政區 Top 5**")
+            st.dataframe(district_top, hide_index=True, use_container_width=True)
+
+
+def _render_inline_multimodal_evidence(result: dict) -> None:
+    """文字 × 圖表 × 地圖的多模態決策佐證，使用者主動展開。"""
+    evidence = _recommend_visual_evidence(result)
+    charts = evidence["charts"]
+    if not charts and not evidence["show_map"] and not evidence["show_table"]:
+        return
+
+    intent = result.get("intent", {}).get("intent", "")
+    uid = abs(hash(result.get("user_input", "") + intent + str(result.get("query", {})))) % 100000
+    key = f"mm_evidence_{uid}"
+
+    st.caption("🧩 可搭配圖表、表格或地圖檢查這個回答的資料依據。")
+    if st.button("📊 顯示多模態決策佐證", key=f"btn_{key}", use_container_width=False):
         st.session_state[key] = not st.session_state.get(key, False)
 
-    if st.session_state.get(key, False):
-        cols = st.columns(min(len(existing), 2))
-        for i, path in enumerate(existing):
-            with cols[i % 2]:
-                caption = _CHART_CAPTIONS.get(path.name, path.stem.replace("_", " "))
-                st.image(str(path), caption=caption, use_container_width=True)
+    if not st.session_state.get(key, False):
+        return
+
+    tabs = st.tabs(["圖表", "資料摘要", "地圖/熱點"])
+
+    with tabs[0]:
+        if charts:
+            cols = st.columns(min(len(charts), 2))
+            for i, path in enumerate(charts):
+                with cols[i % 2]:
+                    caption = _CHART_CAPTIONS.get(path.name, path.stem.replace("_", " "))
+                    st.image(str(path), caption=caption, use_container_width=True)
+                    usage = _CHART_DECISION_USE.get(path.name)
+                    if usage:
+                        st.caption(f"決策用途：{usage}")
+        else:
+            st.info("此問題沒有對應的靜態圖表。")
+
+    with tabs[1]:
+        if evidence["show_table"]:
+            _render_visual_summary_table(result)
+        else:
+            st.info("此問題不需要額外資料表佐證。")
+
+    with tabs[2]:
+        if evidence["show_map"]:
+            st.caption("聊天介面提供精簡地圖；完整地圖與熱點排序請到「決策分析」頁。")
+            _render_chat_map_preview(result.get("query", {}))
+        else:
+            st.info("此問題不需要地圖佐證。")
 
 
 def _render_chart_gallery() -> None:
