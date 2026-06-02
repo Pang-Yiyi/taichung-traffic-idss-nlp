@@ -318,7 +318,6 @@ def print_summary(rule_metrics: dict, llm_metrics: dict | None) -> None:
             "origin_district": "起點行政區",
             "destination_district": "終點行政區",
             "keyword": "關鍵字",
-            "role": "角色",
         }
         for field, acc in sorted(rule_metrics["entity_accuracy"].items()):
             label = label_map.get(field, field)
@@ -449,7 +448,6 @@ def save_markdown_report(rule_metrics: dict, llm_metrics: dict | None, results: 
             "origin_district": "起點行政區",
             "destination_district": "終點行政區",
             "keyword": "關鍵字",
-            "role": "角色",
         }
         entity_totals = {}
         entity_key = "entity_results_rule"

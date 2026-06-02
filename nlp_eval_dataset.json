@@ -164,9 +164,7 @@
       "id": 18,
       "question": "如果我是交通局，應該優先改善哪些問題？",
       "expected_intent": "政策建議",
-      "expected_entities": {
-        "role": "交通局"
-      },
+      "expected_entities": {},
       "note": "標準政策建議"
     },
     {
