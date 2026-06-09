@@ -537,21 +537,42 @@ def fetch_tdx_traffic_tool(
         cache["data"] = base
         cache["ts"] = time.time()
 
+    # 即時資料不可用時，base 可能只有 summary/data_gap，不能再硬讀 avg_speed。
+    if not base.get("available"):
+        return {
+            **base,
+            "district": district,
+            "summary": base.get("summary", "目前無法取得即時車流資料。"),
+        }
+
     # 依關注行政區組裝摘要（去重保序）
     dt = base.get("district_traffic", {})
     _raw_focus = list(districts) if districts else ([district] if district else [])
     focus = list(dict.fromkeys([d for d in _raw_focus if d]))
 
-    parts = [f"台中市整體平均車速 {base['avg_speed']} km/h（{base['level']}）"]
+    avg_speed = base.get("avg_speed")
+    level = base.get("level") or "路況未知"
+    if avg_speed is not None:
+        parts = [f"台中市整體平均車速 {avg_speed} km/h（{level}）"]
+    else:
+        parts = [f"台中市整體路況：{level}"]
+
     focus_lines = []
     for d in focus:
         info = dt.get(d)
         if info:
-            focus_lines.append(f"{d} {info['avg_speed']} km/h（{info['level']}）")
+            d_speed = info.get("avg_speed")
+            d_level = info.get("level") or "路況未知"
+            if d_speed is not None:
+                focus_lines.append(f"{d} {d_speed} km/h（{d_level}）")
+            else:
+                focus_lines.append(f"{d}（{d_level}）")
     if focus_lines:
         parts.append("；".join(focus_lines))
     else:
-        parts.append(f"全市 {base['congested_ratio']}% 路段車速低於 20 km/h")
+        congested_ratio = base.get("congested_ratio")
+        if congested_ratio is not None:
+            parts.append(f"全市 {congested_ratio}% 路段車速低於 20 km/h")
 
     return {
         **base,
